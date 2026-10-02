@@ -16,6 +16,7 @@ import {
   Tag,
   Send,
   Share2,
+  Database,
 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -55,6 +56,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
     { name: 'Spam Protector', href: '/spam-protector', icon: ShieldAlert },
     { name: 'Telegram AI', href: '/telegram-client', icon: Send },
     { name: 'Auto Forward', href: '/forward', icon: Share2 },
+    { name: 'Database Backup', href: '/backups', icon: Database },
     { name: 'Settings', href: '/settings', icon: Settings },
   ];
 

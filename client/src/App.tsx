@@ -107,6 +107,10 @@ function Router() {
         <ProtectedRoute component={BackupPage} />
       </Route>
 
+      <Route path="/backup">
+        <ProtectedRoute component={BackupPage} />
+      </Route>
+
       <Route path="/users">
         <ProtectedRoute component={TelegramUsersPage} />
       </Route>
