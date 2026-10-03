@@ -85,28 +85,34 @@ async function sendPhotoWithCache(
     }
   }
 
-  if (!fs.existsSync(imagePath)) {
-    throw new Error(`Photo file not found at: ${imagePath}`);
+  if (fs.existsSync(imagePath)) {
+    try {
+      console.log(`[Bot API] Uploading photo from path ${imagePath} for ${cacheKey}`);
+      const msg = await targetBot.sendPhoto(chatId, imagePath, options);
+      if (msg.photo && msg.photo.length > 0) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        console.log(`[Bot API] Successfully uploaded photo. Caching file_id: ${fileId} for ${cacheKey}`);
+        await storage.updateSetting(cacheKey, fileId).catch(err => {
+          console.error(`[Bot API] Failed to save cached file_id:`, err);
+        });
+      }
+      return msg;
+    } catch (uploadErr: any) {
+      console.warn(`[Bot API] Direct file path upload failed for ${cacheKey}: ${uploadErr.message || uploadErr}`);
+    }
   }
-  const photoBuffer = fs.readFileSync(imagePath);
 
-  console.log(`[Bot API] Uploading photo buffer for ${cacheKey}`);
-  const msg = await targetBot.sendPhoto(chatId, photoBuffer, options);
-
-  if (msg.photo && msg.photo.length > 0) {
-    const fileId = msg.photo[msg.photo.length - 1].file_id;
-    console.log(`[Bot API] Successfully uploaded photo. Caching file_id: ${fileId} for ${cacheKey}`);
-    await storage.updateSetting(cacheKey, fileId).catch(err => {
-      console.error(`[Bot API] Failed to save cached file_id:`, err);
-    });
-  }
-
-  return msg;
+  // Fallback to text message so the user ALWAYS receives the payment prompt
+  console.log(`[Bot API] Falling back to text message for ${cacheKey}`);
+  return await targetBot.sendMessage(chatId, options.caption || '', {
+    parse_mode: options.parse_mode,
+    reply_markup: options.reply_markup
+  });
 }
 
 async function verifyDepositViaBinance(
   txId: string,
-  networkType: 'TRC20' | 'APTOS',
+  networkType: 'TRC20' | 'APTOS' | 'BEP20' | 'BSC',
   walletAddress: string
 ): Promise<{ success: boolean; actualAmount?: number; error?: string }> {
   try {
@@ -161,6 +167,10 @@ async function verifyDepositViaBinance(
       if (net !== 'APT' && net !== 'APTOS') {
         return { success: false, error: 'Transaction network is not Aptos.' };
       }
+    } else if (networkType === 'BEP20' || networkType === 'BSC') {
+      if (net !== 'BSC' && net !== 'BEP20' && net !== 'BNB') {
+        return { success: false, error: 'Transaction network is not BSC (BEP20).' };
+      }
     }
 
     // Verify deposit address matches our configured wallet address
@@ -171,7 +181,7 @@ async function verifyDepositViaBinance(
       }
     } else {
       if (depAddr.toLowerCase() !== walletAddress.trim().toLowerCase()) {
-        return { success: false, error: 'Deposit destination address does not match our configured TRC20 wallet.' };
+        return { success: false, error: `Deposit destination address does not match our configured ${networkType} wallet.` };
       }
     }
 
@@ -3604,6 +3614,8 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
           walletToCopy = (await storage.getSetting('TRC20_WALLET_ADDRESS'))?.value || "Not Set";
         } else if (walletToCopy === 'aptos') {
           walletToCopy = (await storage.getSetting('APTOS_WALLET_ADDRESS'))?.value || "Not Set";
+        } else if (walletToCopy === 'bep20') {
+          walletToCopy = (await storage.getSetting('BEP20_WALLET_ADDRESS'))?.value || "Not Set";
         }
         await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="6276090299232031662">🆔</tg-emoji> <b>Wallet Address sent!</b> You can now long-press to copy it. <tg-emoji emoji-id="5231102735817918643">📋</tg-emoji>`, { parse_mode: 'HTML' });
         targetBot.sendMessage(chatId, `<code>${walletToCopy}</code>`, { parse_mode: 'HTML' });
@@ -4116,6 +4128,7 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         const binanceEnabled = (await storage.getSetting('PAYMENT_BINANCE_ENABLED'))?.value !== 'false';
         const trc20Enabled = (await storage.getSetting('PAYMENT_TRC20_ENABLED'))?.value === 'true';
         const aptosEnabled = (await storage.getSetting('PAYMENT_APTOS_ENABLED'))?.value === 'true';
+        const bep20Enabled = (await storage.getSetting('PAYMENT_BEP20_ENABLED'))?.value !== 'false';
 
         const keyboard: any[][] = [];
 
@@ -4132,12 +4145,15 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         if (binanceEnabled) {
           row2.push({ text: 'Binance Pay', callback_data: 'payment_binance', icon_custom_emoji_id: '6235482598924095547' });
         }
-        if (trc20Enabled) {
-          row2.push({ text: 'TRC20 (USDT)', callback_data: 'payment_trc20', icon_custom_emoji_id: '5201692367437974073' });
+        if (bep20Enabled) {
+          row2.push({ text: 'BEP20 (USDT)', callback_data: 'payment_bep20', icon_custom_emoji_id: '6235482598924095547' });
         }
         if (row2.length > 0) keyboard.push(row2);
 
         const row3: any[] = [];
+        if (trc20Enabled) {
+          row3.push({ text: 'TRC20 (USDT)', callback_data: 'payment_trc20', icon_custom_emoji_id: '5201692367437974073' });
+        }
         if (aptosEnabled) {
           row3.push({ text: 'Aptos (USDT)', callback_data: 'payment_aptos', icon_custom_emoji_id: '5798849051017352095' });
         }
@@ -4300,6 +4316,39 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         });
         await storage.updateTelegramUserByChatId(chatId.toString(), {
           lastAction: `awaiting_binance_deposit_amount`,
+          lastMessageId: prompt?.message_id
+        });
+        return;
+      }
+
+      if (data === 'payment_bep20') {
+        const bep20Enabled = (await storage.getSetting('PAYMENT_BEP20_ENABLED'))?.value !== 'false';
+        if (!bep20Enabled) {
+          if (queryId) {
+            await targetBot.answerCallbackQuery(queryId, { text: '❌ BEP20 payments are currently disabled.', show_alert: true }).catch(() => {});
+          } else {
+            await targetBot.sendMessage(chatId, '❌ BEP20 payments are currently disabled by the admin.');
+          }
+          return;
+        }
+
+        try {
+          if (query.message) {
+            await targetBot.deleteMessage(chatId, query.message.message_id);
+          }
+        } catch (err) { }
+
+        try {
+          if (tgUser?.lastMessageId) {
+            await targetBot.deleteMessage(chatId, tgUser.lastMessageId).catch(() => { });
+          }
+        } catch (err) { }
+
+        const prompt = await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="6235482598924095547">🟡</tg-emoji> Enter amount for <b>BEP20 / BSC (USDT)</b> deposit (<tg-emoji emoji-id="5201692367437974073">💵</tg-emoji>):`, {
+          parse_mode: 'HTML'
+        });
+        await storage.updateTelegramUserByChatId(chatId.toString(), {
+          lastAction: `awaiting_bep20_amount`,
           lastMessageId: prompt?.message_id
         });
         return;
@@ -6087,6 +6136,232 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         } catch (err: any) {
           console.error("Error initiating Aptos payment:", err);
           targetBot.sendMessage(chatId, `❌ Failed to initiate Aptos deposit: ${err.message || err}`);
+        }
+      } else if (tgUser?.lastAction === 'awaiting_bep20_amount') {
+        try {
+          const amount = parseFloat(normalizedText || "0");
+
+          try {
+            if (tgUser.lastMessageId) {
+              await targetBot.deleteMessage(chatId, tgUser.lastMessageId);
+            }
+            await targetBot.deleteMessage(chatId, msg.message_id);
+          } catch (e) { }
+
+          if (isNaN(amount) || amount <= 0) {
+            targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a number.");
+            return;
+          }
+
+          const wallet = (await storage.getSetting('BEP20_WALLET_ADDRESS'))?.value || "Not Set";
+
+          const existingPending = await storage.getPendingPaymentByAmount(tgUser.id, Math.round(amount * 100));
+          if (existingPending) {
+            await storage.updateTelegramUserByChatId(chatId.toString(), { lastAction: null });
+            return targetBot.sendMessage(chatId, `⚠️ You already have a pending $${amount} payment. Please pay that one first or wait for it to expire (1 hour).`);
+          }
+
+          const payment = await storage.createPayment({
+            telegramUserId: tgUser.id,
+            amount: Math.round(amount * 100),
+            paymentMethod: 'bep20',
+            status: 'pending'
+          });
+
+          await storage.updateTelegramUserByChatId(chatId.toString(), {
+            lastAction: `awaiting_bep20_txid_${payment.id}_0`
+          });
+
+          const responseMsg = `<tg-emoji emoji-id="6235482598924095547">🟡</tg-emoji> <b>Top-up: BEP20 / BSC (USDT)</b>\n` +
+            `━━━━━━━━━━━━━━━\n` +
+            `<tg-emoji emoji-id="6276090299232031662">✅</tg-emoji> <b>BEP20 Address:</b> <code>${wallet}</code>\n` +
+            `<tg-emoji emoji-id="5231102735817918643">💵</tg-emoji> <b>Transfer amount:</b> <code>${amount.toFixed(2)}$</code>\n\n` +
+            `<tg-emoji emoji-id="6327875123646829719">⚠️</tg-emoji> <b>IMPORTANT</b>\n` +
+            `• Please transfer this <b>exact amount</b>.\n` +
+            `• You <b>MUST</b> use the <b>BNB Smart Chain (BEP20 / BSC) network</b>.\n` +
+            `━━━━━━━━━━━━━━━\n` +
+            `<tg-emoji emoji-id="6010111371251815589">⏳</tg-emoji> After payment, click on Check payment or paste your Transaction Hash (TXID)`;
+
+          const keyboard = [
+            [{ text: `Copy Wallet Address`, callback_data: `copy_wallet_bep20`, icon_custom_emoji_id: '5334982154868783692' }],
+            [{ text: 'Check payment', callback_data: `check_payment_${payment.id}`, icon_custom_emoji_id: '6010111371251815589' }]
+          ] as any[][];
+
+          const imagePath = path.resolve(process.cwd(), 'public/assets/binance_pay_new.png');
+          try {
+            await sendPhotoWithCache(targetBot, chatId, imagePath, 'FILE_ID_USDT_BEP20', {
+              caption: responseMsg,
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: keyboard }
+            });
+          } catch (photoErr) {
+            console.error("Failed to send BEP20 photo:", photoErr);
+            await targetBot.sendMessage(chatId, responseMsg, {
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: keyboard }
+            });
+          }
+        } catch (err: any) {
+          console.error("Error initiating BEP20 payment:", err);
+          targetBot.sendMessage(chatId, `❌ Failed to initiate BEP20 deposit: ${err.message || err}`);
+        }
+      } else if (tgUser?.lastAction?.startsWith('awaiting_bep20_txid_')) {
+        const parts = tgUser.lastAction.split('_');
+        const paymentId = parseInt(parts[3]);
+        const attempts = parts.length > 4 ? parseInt(parts[4]) : 0;
+        const txId = normalizedText?.trim() || "";
+
+        try {
+          if (tgUser.lastMessageId) {
+            await targetBot.deleteMessage(chatId, tgUser.lastMessageId);
+          }
+          await targetBot.deleteMessage(chatId, msg.message_id);
+        } catch (e) { }
+
+        if (!txId) {
+          const failMsg = await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="6298544405435387645">❌</tg-emoji> <b>Please enter a valid Transaction ID (TXID).</b>`, { parse_mode: 'HTML' });
+          setTimeout(() => {
+            targetBot.deleteMessage(chatId, failMsg.message_id).catch(() => {});
+          }, 15000);
+          return;
+        }
+
+        const payment = await db.transaction(async (tx) => {
+          const [p] = await tx.select().from(payments).where(eq(payments.id, paymentId)).for('update');
+          if (!p) return null;
+          if (p.status !== 'pending') return p;
+
+          const [updated] = await tx.update(payments)
+            .set({ status: 'processing', updatedAt: new Date() })
+            .where(eq(payments.id, paymentId))
+            .returning();
+          return updated;
+        });
+
+        if (!payment || payment.status !== 'processing') {
+          const failMsg = await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="6298544405435387645">❌</tg-emoji> <b>Payment request not found or already processed. Please request a new deposit.</b>`, { parse_mode: 'HTML' });
+          setTimeout(() => {
+            targetBot.deleteMessage(chatId, failMsg.message_id).catch(() => {});
+          }, 15000);
+          return;
+        }
+
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+        if (payment.createdAt && new Date(payment.createdAt) < oneHourAgo) {
+          await storage.updatePayment(payment.id, { status: 'expired' });
+          await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="6298544405435387645">❌</tg-emoji> <b>This payment request has expired. Please create a new one.</b>`, { parse_mode: 'HTML' });
+          return;
+        }
+
+        const walletAddress = (await storage.getSetting('BEP20_WALLET_ADDRESS'))?.value;
+        if (!walletAddress) {
+          await storage.updatePayment(payment.id, { status: 'pending' });
+          await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="6298544405435387645">❌</tg-emoji> <b>BEP20 wallet is not configured. Please contact support.</b>`, { parse_mode: 'HTML' });
+          return;
+        }
+
+        try {
+          const checkingMsg = await targetBot.sendMessage(chatId, `⏳ <b>Verifying your BEP20 payment via Binance...</b> Please wait a moment.`, { parse_mode: 'HTML' });
+
+          const result = await verifyDepositViaBinance(txId, 'BEP20', walletAddress);
+
+          try {
+            await targetBot.deleteMessage(chatId, checkingMsg.message_id);
+          } catch (e) { }
+
+          if (result.success && result.actualAmount) {
+            const cleanTxId = txId.trim().toLowerCase();
+            const txResult = await db.transaction(async (tx) => {
+              const [settingRow] = await tx.select().from(settings).where(eq(settings.key, 'USED_TXIDS_JSON')).for('update');
+              let currentUsed: string[] = [];
+              if (settingRow?.value) {
+                try { currentUsed = JSON.parse(settingRow.value); } catch(e) {}
+              }
+              if (currentUsed.includes(cleanTxId)) {
+                return { success: false, error: "duplicate" };
+              }
+
+              const existingCompleted = await tx.select().from(payments).where(and(eq(payments.externalId, cleanTxId), eq(payments.status, 'completed'))).limit(1);
+              if (existingCompleted.length > 0) {
+                return { success: false, error: "duplicate" };
+              }
+
+              const [u] = await tx.select().from(telegramUsers).where(eq(telegramUsers.id, tgUser.id)).for('update');
+              if (!u) return { success: false, error: "user_not_found" };
+
+              currentUsed.push(cleanTxId);
+              if (settingRow) {
+                await tx.update(settings).set({ value: JSON.stringify(currentUsed), updatedAt: new Date() }).where(eq(settings.key, 'USED_TXIDS_JSON'));
+              } else {
+                await tx.insert(settings).values({ key: 'USED_TXIDS_JSON', value: JSON.stringify(currentUsed) });
+              }
+
+              const creditAmountCents = Math.round(result.actualAmount * 100);
+              await tx.update(telegramUsers).set({
+                balance: u.balance + creditAmountCents,
+                lastAction: null,
+                lastMessageId: null
+              }).where(eq(telegramUsers.id, u.id));
+
+              await tx.update(payments).set({
+                status: 'completed',
+                externalId: cleanTxId,
+                amount: creditAmountCents,
+                updatedAt: new Date()
+              }).where(eq(payments.id, payment.id));
+
+              return { success: true, creditAmountCents };
+            });
+
+            if (txResult.success) {
+              await targetBot.sendMessage(chatId, 
+                `<tg-emoji emoji-id="6276090299232031662">✅</tg-emoji> <b>BEP20 Payment Verified successfully!</b>\n\n` +
+                `<tg-emoji emoji-id="5388622778817589921">💰</tg-emoji> Credited: <b>$${result.actualAmount.toFixed(2)}</b> has been added to your balance.\n` +
+                `<tg-emoji emoji-id="6276090299232031662">🆔</tg-emoji> Account ID: <code>${tgUser.telegramId}</code>\n\n` +
+                `Thank you for your purchase! <tg-emoji emoji-id="5231102735817918643">🤍</tg-emoji>`,
+                { parse_mode: 'HTML' }
+              );
+
+              const userDisplayName = tgUser.firstName || tgUser.username || "User";
+              io.emit('admin_notification', {
+                type: 'deposit',
+                title: 'New BEP20 Deposit',
+                message: `${userDisplayName} deposited $${result.actualAmount.toFixed(2)} via BEP20`,
+                data: {
+                  paymentId: payment.id,
+                  userId: tgUser.telegramId,
+                  amount: result.actualAmount,
+                  txId: cleanTxId
+                }
+              });
+
+              sendAdminPushNotification(
+                'New BEP20 Deposit',
+                `${userDisplayName} deposited $${result.actualAmount.toFixed(2)} (TXID: ${cleanTxId.substring(0, 10)}...)`
+              ).catch(console.error);
+            } else if (txResult.error === "duplicate") {
+              await storage.updatePayment(payment.id, { status: 'pending' });
+              await targetBot.sendMessage(chatId, `❌ <b>This Transaction ID (TXID) has already been used and claimed.</b> You cannot reuse a TXID.`, { parse_mode: 'HTML' });
+            } else {
+              await storage.updatePayment(payment.id, { status: 'pending' });
+              await targetBot.sendMessage(chatId, `❌ Verification failed. User record not found.`);
+            }
+          } else {
+            await storage.updatePayment(payment.id, { status: 'pending' });
+            const errorReason = result.error || "Deposit record not found in Binance";
+            const failMsg = `<tg-emoji emoji-id="6298544405435387645">❌</tg-emoji> <b>Payment Verification Failed</b>\n\n${errorReason}\n\nPlease check that your transfer is confirmed on BSC network.`;
+            const sentMsg = await targetBot.sendMessage(chatId, failMsg, { parse_mode: 'HTML' });
+            if (sentMsg) {
+              await storage.updateTelegramUser(tgUser.id, { lastErrorMessageId: sentMsg.message_id });
+              setTimeout(() => {
+                targetBot.deleteMessage(chatId, sentMsg.message_id).catch(() => { });
+              }, 20000);
+            }
+          }
+        } catch (err: any) {
+          await storage.updatePayment(payment.id, { status: 'pending' });
+          console.error("Error verifying BEP20 deposit:", err);
+          await targetBot.sendMessage(chatId, `❌ Error during verification: ${err.message || err}`);
         }
       } else if (tgUser?.lastAction?.startsWith('awaiting_trc20_txid_')) {
         const parts = tgUser.lastAction.split('_');

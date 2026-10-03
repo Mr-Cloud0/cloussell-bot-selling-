@@ -133,6 +133,14 @@ export default function SettingsPage() {
     queryKey: ["/api/settings/APTOS_VERIFICATION_MODE"],
   });
 
+  const { data: bep20EnabledSetting, isLoading: isBep20EnabledLoading } = useQuery<{ key: string, value: string }>({
+    queryKey: ["/api/settings/PAYMENT_BEP20_ENABLED"],
+  });
+
+  const { data: bep20WalletSetting, isLoading: isBep20WalletLoading } = useQuery<{ key: string, value: string }>({
+    queryKey: ["/api/settings/BEP20_WALLET_ADDRESS"],
+  });
+
   const { data: automationEnabledSetting, isLoading: isAutomationEnabledLoading } = useQuery<{ key: string, value: string }>({
     queryKey: ["/api/settings/AUTOMATION_ENABLED"],
   });
@@ -176,15 +184,17 @@ export default function SettingsPage() {
     isSpecialOffersEnabledLoading || isStoreNameLoading || isSupportUsernameLoading ||
     isSupportBtnTextLoading || isLoadingTextLoading ||
     isTrc20EnabledLoading || isAptosEnabledLoading || isTrc20WalletLoading || isAptosWalletLoading ||
-    isTrc20VerificationModeLoading || isAptosVerificationModeLoading || isGeminiLoading ||
+    isTrc20VerificationModeLoading || isAptosVerificationModeLoading || isBep20EnabledLoading || isBep20WalletLoading || isGeminiLoading ||
     isExtraInstructionsLoading || isVapidPublicLoading || isVapidPrivateLoading || isVapidSubjectLoading;
 
   const [binanceEnabled, setBinanceEnabled] = useState(true);
   const [cryptomusEnabled, setCryptomusEnabled] = useState(true);
   const [trc20Enabled, setTrc20Enabled] = useState(false);
   const [aptosEnabled, setAptosEnabled] = useState(false);
+  const [bep20Enabled, setBep20Enabled] = useState(false);
   const [trc20Wallet, setTrc20Wallet] = useState("");
   const [aptosWallet, setAptosWallet] = useState("");
+  const [bep20Wallet, setBep20Wallet] = useState("");
   const [trc20VerificationMode, setTrc20VerificationMode] = useState("binance");
   const [aptosVerificationMode, setAptosVerificationMode] = useState("binance");
   const [automationEnabled, setAutomationEnabled] = useState(true);
@@ -233,6 +243,14 @@ export default function SettingsPage() {
   useEffect(() => {
     if (aptosVerificationModeSetting?.value !== undefined) setAptosVerificationMode(aptosVerificationModeSetting.value || "binance");
   }, [aptosVerificationModeSetting]);
+
+  useEffect(() => {
+    if (bep20EnabledSetting?.value !== undefined) setBep20Enabled(bep20EnabledSetting.value === "true");
+  }, [bep20EnabledSetting]);
+
+  useEffect(() => {
+    if (bep20WalletSetting?.value !== undefined) setBep20Wallet(bep20WalletSetting.value);
+  }, [bep20WalletSetting]);
 
   useEffect(() => {
     if (automationEnabledSetting?.value !== undefined) setAutomationEnabled(automationEnabledSetting.value === "true");
@@ -573,6 +591,23 @@ export default function SettingsPage() {
       toast({
         title: "Aptos Verification Mode Updated",
         description: "Aptos payment verification mode has been updated.",
+      });
+    }
+  });
+
+  const bep20WalletMutation = useMutation({
+    mutationFn: async (value: string) => {
+      const res = await apiRequest("POST", "/api/settings", {
+        key: "BEP20_WALLET_ADDRESS",
+        value
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/settings/BEP20_WALLET_ADDRESS"] });
+      toast({
+        title: "BEP20 Wallet Updated",
+        description: "BEP20 (BSC) wallet address has been updated.",
       });
     }
   });
@@ -1642,6 +1677,49 @@ export default function SettingsPage() {
                     <option value="blockchain" className="bg-purple-950 text-white">Blockchain Network (Aptos Fullnode)</option>
                   </select>
                   <p className="text-[10px] text-white/40">Select the service to use for payment verification.</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="h-px bg-white/5" />
+
+            {/* BEP20 (BSC) Section */}
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold text-yellow-400">BEP20 / BSC (USDT) Integration</h3>
+                <Button
+                  variant={bep20Enabled ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => {
+                    const newValue = !bep20Enabled;
+                    setBep20Enabled(newValue);
+                    togglePaymentMutation.mutate({ key: "PAYMENT_BEP20_ENABLED", value: newValue.toString() });
+                  }}
+                  className={bep20Enabled ? "bg-green-500 hover:bg-green-600" : "border-white/20"}
+                >
+                  {bep20Enabled ? "Enabled" : "Disabled"}
+                </Button>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label className="text-xs font-bold text-white/50 uppercase tracking-widest">BEP20 (BSC) Wallet Address</Label>
+                  <div className="flex gap-3">
+                    <Input
+                      placeholder="Enter BEP20 (BSC) USDT Wallet Address..."
+                      className="glass-panel border-white/10 bg-white/5 text-white h-12"
+                      value={bep20Wallet}
+                      onChange={(e) => setBep20Wallet(e.target.value)}
+                    />
+                    <Button
+                      onClick={() => bep20WalletMutation.mutate(bep20Wallet)}
+                      disabled={bep20WalletMutation.isPending}
+                      className="h-12 px-4 rounded-xl bg-gradient-to-r from-yellow-500 to-amber-600 font-bold"
+                    >
+                      <Save className="w-5 h-5" />
+                    </Button>
+                  </div>
+                  <p className="text-[10px] text-white/40">USDT deposit address on the BNB Smart Chain (BEP20) network. Automatically verified via Binance API.</p>
                 </div>
               </div>
             </div>
