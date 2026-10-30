@@ -344,7 +344,7 @@ export default function SettingsPage() {
     mutationFn: async (value: string) => {
       const res = await apiRequest("POST", "/api/settings", {
         key: "TELEGRAM_BOT_TOKEN",
-        value
+        value: value.trim()
       });
       return res.json();
     },
@@ -354,6 +354,13 @@ export default function SettingsPage() {
         title: "Settings Updated",
         description: "Telegram Bot has been re-initialized with the new token.",
       });
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Bot Token Update Failed",
+        description: err.message || "Failed to update Telegram Bot token. Please verify token with @BotFather.",
+        variant: "destructive",
+      });
     }
   });
 
@@ -361,7 +368,7 @@ export default function SettingsPage() {
     mutationFn: async (value: string) => {
       const res = await apiRequest("POST", "/api/settings", {
         key: "BROADCAST_BOT_TOKEN",
-        value
+        value: value.trim()
       });
       return res.json();
     },
@@ -370,6 +377,13 @@ export default function SettingsPage() {
       toast({
         title: "Broadcast Bot Updated",
         description: "Separate broadcast bot token has been saved.",
+      });
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Broadcast Token Update Failed",
+        description: err.message || "Failed to update Broadcast Bot token.",
+        variant: "destructive",
       });
     }
   });
@@ -807,7 +821,26 @@ export default function SettingsPage() {
                   onChange={(e) => setToken(e.target.value)}
                 />
                 <Button
-                  onClick={() => mutation.mutate(token)}
+                  onClick={() => {
+                    const trimmed = token.trim();
+                    if (!trimmed) {
+                      toast({
+                        title: "Token Required",
+                        description: "Please paste your Telegram Bot Token.",
+                        variant: "destructive",
+                      });
+                      return;
+                    }
+                    if (!/^\d{8,12}:[a-zA-Z0-9_-]{30,50}$/.test(trimmed)) {
+                      toast({
+                        title: "Invalid Bot Token Format",
+                        description: "Token format should look like: 123456789:ABCdefGhIjkLmNoPQRsTuvWxyz...",
+                        variant: "destructive",
+                      });
+                      return;
+                    }
+                    mutation.mutate(trimmed);
+                  }}
                   disabled={mutation.isPending}
                   className="h-12 px-6 rounded-xl bg-gradient-to-r from-purple-500 to-blue-600 hover:from-purple-600 hover:to-blue-700 font-bold"
                 >
@@ -831,7 +864,18 @@ export default function SettingsPage() {
                   onChange={(e) => setBroadcastToken(e.target.value)}
                 />
                 <Button
-                  onClick={() => broadcastMutation.mutate(broadcastToken)}
+                  onClick={() => {
+                    const trimmed = broadcastToken.trim();
+                    if (trimmed && !/^\d{8,12}:[a-zA-Z0-9_-]{30,50}$/.test(trimmed)) {
+                      toast({
+                        title: "Invalid Broadcast Token Format",
+                        description: "Token format should look like: 123456789:ABCdefGhIjkLmNoPQRsTuvWxyz...",
+                        variant: "destructive",
+                      });
+                      return;
+                    }
+                    broadcastMutation.mutate(trimmed);
+                  }}
                   disabled={broadcastMutation.isPending}
                   className="h-12 px-6 rounded-xl bg-gradient-to-r from-purple-500 to-blue-600 font-bold"
                 >

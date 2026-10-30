@@ -557,18 +557,24 @@ export class DatabaseStorage implements IStorage {
   }
 
   async expireOldPayments(): Promise<void> {
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    await db.update(payments)
-      .set({ status: 'expired', updatedAt: new Date() })
-      .where(
-        and(
-          eq(payments.status, 'pending'),
-          sql`${payments.createdAt} < ${oneHourAgo}`
-        )
-      );
+    try {
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      await db.update(payments)
+        .set({ status: 'expired', updatedAt: new Date() })
+        .where(
+          and(
+            eq(payments.status, 'pending'),
+            sql`${payments.createdAt} < ${oneHourAgo}`
+          )
+        );
+    } catch (err) {
+      console.error('Failed to expire old payments:', err);
+    }
   }
 
   async getPendingPaymentByAmount(userId: number, amount: number): Promise<Payment | undefined> {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    await this.expireOldPayments().catch(() => {});
     const [existing] = await db
       .select()
       .from(payments)
@@ -576,7 +582,8 @@ export class DatabaseStorage implements IStorage {
         and(
           eq(payments.telegramUserId, userId),
           eq(payments.amount, amount),
-          eq(payments.status, 'pending')
+          eq(payments.status, 'pending'),
+          sql`${payments.createdAt} >= ${oneHourAgo}`
         )
       )
       .limit(1);

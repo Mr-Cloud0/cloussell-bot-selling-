@@ -2055,21 +2055,66 @@ app.post("/api/broadcast/availability", isAuth, async (req, res) => {
 
 app.post("/api/settings", isAuth, async (req, res) => {
   try {
-    const { key, value } = req.body;
+    let { key, value } = req.body;
+    if (typeof value === 'string') {
+      value = value.trim();
+    }
+
+    if (key === "TELEGRAM_BOT_TOKEN") {
+      if (!value) {
+        return res.status(400).json({ message: "Telegram bot token cannot be empty" });
+      }
+      try {
+        const verifyRes = await axios.get(`https://api.telegram.org/bot${value}/getMe`, { timeout: 8000 });
+        if (!verifyRes.data || !verifyRes.data.ok) {
+          return res.status(400).json({ message: "Invalid Telegram bot token. Telegram API rejected it." });
+        }
+      } catch (tgErr: any) {
+        const msg = tgErr.response?.data?.description || tgErr.message || "Invalid bot token";
+        return res.status(400).json({ message: `Telegram verification failed: ${msg}` });
+      }
+    }
+
+    if (key === "BROADCAST_BOT_TOKEN" && value) {
+      try {
+        const verifyRes = await axios.get(`https://api.telegram.org/bot${value}/getMe`, { timeout: 8000 });
+        if (!verifyRes.data || !verifyRes.data.ok) {
+          return res.status(400).json({ message: "Invalid Broadcast bot token. Telegram API rejected it." });
+        }
+      } catch (tgErr: any) {
+        const msg = tgErr.response?.data?.description || tgErr.message || "Invalid broadcast bot token";
+        return res.status(400).json({ message: `Telegram verification failed: ${msg}` });
+      }
+    }
+
     const updated = await storage.updateSetting(key, value);
 
     // Re-initialize bot if token changed
     if (key === "TELEGRAM_BOT_TOKEN" || key === "BROADCAST_BOT_TOKEN") {
       await initBot();
+      if (key === "TELEGRAM_BOT_TOKEN") {
+        await storage.updateSetting('FILE_ID_BINANCE_PAY', '').catch(() => {});
+        await storage.updateSetting('FILE_ID_CRYPTOBOT', '').catch(() => {});
+        await storage.updateSetting('FILE_ID_USDT_BEP20', '').catch(() => {});
+        await storage.updateSetting('FILE_ID_USDT_TRC20', '').catch(() => {});
+        await storage.updateSetting('FILE_ID_USDT_APTOS', '').catch(() => {});
+      }
+      try {
+        const { reinitForwardBot } = await import("./forward-service");
+        const forwardTokenSetting = await storage.getSetting("TG_FORWARD_BOT_TOKEN");
+        if (forwardTokenSetting?.value) {
+          await reinitForwardBot(forwardTokenSetting.value);
+        }
+      } catch (fwdErr) {}
     } else if (key === "VAPID_PUBLIC_KEY" || key === "VAPID_PRIVATE_KEY" || key === "VAPID_SUBJECT") {
       const { initPushNotifications } = await import("./push-notifications");
       await initPushNotifications();
     }
 
     res.json(updated);
-  } catch (err) {
+  } catch (err: any) {
     console.error('Settings update error:', err);
-    res.status(500).json({ message: "Internal server error" });
+    res.status(500).json({ message: err.message || "Internal server error" });
   }
 });
 
@@ -2380,17 +2425,43 @@ let broadcastBot: TelegramBot | null = null;
 
 const initBot = async () => {
   try {
-    const token = await getBotToken();
+    const rawToken = await getBotToken();
+    const token = rawToken?.trim();
     const broadcastTokenSetting = await storage.getSetting("BROADCAST_BOT_TOKEN");
-    const broadcastToken = broadcastTokenSetting?.value;
+    const broadcastToken = broadcastTokenSetting?.value?.trim();
 
     console.log('Initializing Telegram bots...');
 
-    if (token) {
-      if (bot) {
-        console.log('Stopping existing main bot...');
-        await bot.stopPolling();
+    if (bot) {
+      console.log('Stopping existing main bot...');
+      try {
+        if (bot.isPolling()) {
+          await bot.stopPolling({ cancel: true });
+        }
+        bot.removeAllListeners();
+      } catch (stopErr) {
+        console.warn('Error stopping main bot polling:', stopErr);
       }
+      bot = null;
+    }
+
+    if (broadcastBot) {
+      console.log('Stopping existing broadcast bot...');
+      try {
+        if (broadcastBot.isPolling()) {
+          await broadcastBot.stopPolling({ cancel: true });
+        }
+        broadcastBot.removeAllListeners();
+      } catch (stopErr) {
+        console.warn('Error stopping broadcast bot polling:', stopErr);
+      }
+      broadcastBot = null;
+    }
+
+    // Wait a brief moment to allow in-flight connections to terminate cleanly
+    await new Promise(r => setTimeout(r, 1000));
+
+    if (token) {
       bot = new TelegramBot(token, { polling: true });
       patchBotMethods(bot);
       setupBotHandlers(bot);
@@ -2399,17 +2470,10 @@ const initBot = async () => {
     }
 
     if (broadcastToken && broadcastToken !== token) {
-      if (broadcastBot) {
-        console.log('Stopping existing broadcast bot...');
-        await broadcastBot.stopPolling();
-      }
       broadcastBot = new TelegramBot(broadcastToken, { polling: true });
       patchBotMethods(broadcastBot);
       setupBotHandlers(broadcastBot);
       console.log('Broadcast bot initialized successfully');
-    } else if (broadcastBot) {
-      await broadcastBot.stopPolling();
-      broadcastBot = null;
     }
   } catch (err) {
     console.error('Telegram bot init failed:', err);
@@ -4166,9 +4230,13 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
           return;
         }
 
-        await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="5201692367437974073">💰</tg-emoji> <b>Select Payment Method:</b>`, {
+        const promptMsg = await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="5201692367437974073">💰</tg-emoji> <b>Select Payment Method:</b>\n\nTap a button below or type a number (1-6):\n1️⃣ CryptoBot\n2️⃣ Cryptomus\n3️⃣ Binance Pay\n4️⃣ BEP20 (USDT)\n5️⃣ TRC20 (USDT)\n6️⃣ Aptos (USDT)`, {
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: keyboard }
+        });
+        await storage.updateTelegramUserByChatId(chatId.toString(), {
+          lastAction: 'awaiting_payment_method',
+          lastMessageId: promptMsg?.message_id
         });
         return;
       }
@@ -5535,6 +5603,10 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
     });
 
     targetBot.on('message', async (msg) => {
+      // Only handle actions on the main bot
+      const isMainBot = !bot || (targetBot as any).token?.trim() === (bot as any)?.token?.trim();
+      if (!isMainBot) return;
+
       const chatId = msg.chat.id;
       const text = msg.text;
       const userId = msg.from?.id.toString();
@@ -5849,8 +5921,138 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
           }
           await targetBot.deleteMessage(chatId, msg.message_id);
         } catch (e) { }
-      } else if (tgUser?.lastAction === 'awaiting_cryptobot_amount') {
-        const amount = parseFloat(normalizedText || "0");
+      } else if (tgUser?.lastAction === 'awaiting_payment_method') {
+        const input = (normalizedText || "").toLowerCase().trim();
+        const cryptobotEnabled = (await storage.getSetting('PAYMENT_CRYPTOBOT_ENABLED'))?.value !== 'false';
+        const cryptomusEnabled = (await storage.getSetting('PAYMENT_CRYPTOMUS_ENABLED'))?.value !== 'false';
+        const binanceEnabled = (await storage.getSetting('PAYMENT_BINANCE_ENABLED'))?.value !== 'false';
+        const bep20Enabled = (await storage.getSetting('PAYMENT_BEP20_ENABLED'))?.value !== 'false';
+        const trc20Enabled = (await storage.getSetting('PAYMENT_TRC20_ENABLED'))?.value === 'true';
+        const aptosEnabled = (await storage.getSetting('PAYMENT_APTOS_ENABLED'))?.value === 'true';
+
+        try {
+          if (tgUser.lastMessageId) await targetBot.deleteMessage(chatId, tgUser.lastMessageId).catch(() => {});
+          await targetBot.deleteMessage(chatId, msg.message_id).catch(() => {});
+        } catch (e) {}
+
+        if (input === '1' || input.includes('cryptobot')) {
+          if (!cryptobotEnabled) {
+            await targetBot.sendMessage(chatId, '❌ CryptoBot payments are currently disabled.');
+            return;
+          }
+          const keyboard: any[][] = [
+            [
+              { text: '1', callback_data: 'cryptobot_amount_1', icon_custom_emoji_id: '5409048419211682843' },
+              { text: '5', callback_data: 'cryptobot_amount_5', icon_custom_emoji_id: '5409048419211682843' },
+              { text: '10', callback_data: 'cryptobot_amount_10', icon_custom_emoji_id: '5409048419211682843' }
+            ],
+            [
+              { text: 'Custom', callback_data: 'cryptobot_amount_custom', icon_custom_emoji_id: '5814427657609153890' }
+            ]
+          ];
+          const prompt = await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="5361543877599724417">🤖</tg-emoji> Enter amount for <b>@CryptoBot</b> deposit in USD (<tg-emoji emoji-id="5201692367437974073">💵</tg-emoji>):`, {
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: keyboard }
+          });
+          await storage.updateTelegramUserByChatId(chatId.toString(), {
+            lastAction: 'awaiting_cryptobot_amount_selection',
+            lastMessageId: prompt?.message_id
+          });
+        } else if (input === '2' || input.includes('cryptomus')) {
+          if (!cryptomusEnabled) {
+            await targetBot.sendMessage(chatId, '❌ Cryptomus payments are currently disabled.');
+            return;
+          }
+          const keyboard: any[][] = [
+            [
+              { text: '1', callback_data: 'cryptomus_amount_1', icon_custom_emoji_id: '5409048419211682843' },
+              { text: '5', callback_data: 'cryptomus_amount_5', icon_custom_emoji_id: '5409048419211682843' },
+              { text: '10', callback_data: 'cryptomus_amount_10', icon_custom_emoji_id: '5409048419211682843' }
+            ],
+            [
+              { text: 'Custom', callback_data: 'cryptomus_amount_custom', icon_custom_emoji_id: '5814427657609153890' }
+            ]
+          ];
+          const prompt = await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="5341506639688126935">💰</tg-emoji> Enter amount for <b>Cryptomus</b> deposit in USD (<tg-emoji emoji-id="5201692367437974073">💵</tg-emoji>):`, {
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: keyboard }
+          });
+          await storage.updateTelegramUserByChatId(chatId.toString(), {
+            lastAction: 'awaiting_cryptomus_amount_selection',
+            lastMessageId: prompt?.message_id
+          });
+        } else if (input === '3' || input.includes('binance')) {
+          if (!binanceEnabled) {
+            await targetBot.sendMessage(chatId, '❌ Binance Pay is currently disabled.');
+            return;
+          }
+          const prompt = await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="5296437653770608702">💰</tg-emoji> Enter amount for Binance (USDT <tg-emoji emoji-id="5201692367437974073">💵</tg-emoji>):`, {
+            parse_mode: 'HTML'
+          });
+          await storage.updateTelegramUserByChatId(chatId.toString(), {
+            lastAction: `awaiting_binance_deposit_amount`,
+            lastMessageId: prompt?.message_id
+          });
+        } else if (input === '4' || input.includes('bep20') || input.includes('bsc')) {
+          if (!bep20Enabled) {
+            await targetBot.sendMessage(chatId, '❌ BEP20 payments are currently disabled.');
+            return;
+          }
+          const prompt = await targetBot.sendMessage(chatId, `<tg-emoji emoji-id="6235482598924095547">🟡</tg-emoji> Enter amount for <b>BEP20 / BSC (USDT)</b> deposit (<tg-emoji emoji-id="5201692367437974073">💵</tg-emoji>):`, {
+            parse_mode: 'HTML'
+          });
+          await storage.updateTelegramUserByChatId(chatId.toString(), {
+            lastAction: `awaiting_bep20_amount`,
+            lastMessageId: prompt?.message_id
+          });
+        } else if (input === '5' || input.includes('trc20') || input.includes('tron')) {
+          if (!trc20Enabled) {
+            await targetBot.sendMessage(chatId, '❌ TRC20 payments are currently disabled.');
+            return;
+          }
+          const wallet = (await storage.getSetting('TRC20_WALLET_ADDRESS'))?.value;
+          if (!wallet) {
+            await targetBot.sendMessage(chatId, '❌ TRC20 wallet not configured. Contact support.');
+            return;
+          }
+          const prompt = await targetBot.sendMessage(chatId,
+            `<tg-emoji emoji-id="5296437653770608702">💰</tg-emoji> <b>TRC20 (USDT) Deposit</b>\n\nEnter the <b>USDT amount</b> you want to deposit (USD <tg-emoji emoji-id="5201692367437974073">💵</tg-emoji>):`,
+            { parse_mode: 'HTML' }
+          );
+          await storage.updateTelegramUserByChatId(chatId.toString(), {
+            lastAction: 'awaiting_trc20_amount',
+            lastMessageId: prompt?.message_id
+          });
+        } else if (input === '6' || input.includes('aptos')) {
+          if (!aptosEnabled) {
+            await targetBot.sendMessage(chatId, '❌ Aptos payments are currently disabled.');
+            return;
+          }
+          const wallet = (await storage.getSetting('APTOS_WALLET_ADDRESS'))?.value;
+          if (!wallet) {
+            await targetBot.sendMessage(chatId, '❌ Aptos wallet not configured. Contact support.');
+            return;
+          }
+          const prompt = await targetBot.sendMessage(chatId,
+            `<tg-emoji emoji-id="5798849051017352095">⚡</tg-emoji> <b>Aptos (USDT) Deposit</b>\n\nEnter the <b>USDT amount</b> you want to deposit (USD <tg-emoji emoji-id="5201692367437974073">💵</tg-emoji>):`,
+            { parse_mode: 'HTML' }
+          );
+          await storage.updateTelegramUserByChatId(chatId.toString(), {
+            lastAction: 'awaiting_aptos_amount',
+            lastMessageId: prompt?.message_id
+          });
+        } else {
+          const cleanNum = input.replace(/[^0-9.]/g, '');
+          const parsed = parseFloat(cleanNum);
+          if (!isNaN(parsed) && parsed > 0) {
+            await targetBot.sendMessage(chatId, `💡 To deposit <b>$${parsed.toFixed(2)}</b>, please select a payment method by typing a number (1 - 6):\n\n1️⃣ CryptoBot\n2️⃣ Cryptomus\n3️⃣ Binance Pay\n4️⃣ BEP20 (USDT)\n5️⃣ TRC20 (USDT)\n6️⃣ Aptos (USDT)`, { parse_mode: 'HTML' });
+          } else {
+            await targetBot.sendMessage(chatId, `❓ Please select a payment method by tapping a button above or typing a number (1 - 6):\n\n1️⃣ CryptoBot\n2️⃣ Cryptomus\n3️⃣ Binance Pay\n4️⃣ BEP20 (USDT)\n5️⃣ TRC20 (USDT)\n6️⃣ Aptos (USDT)`);
+          }
+        }
+      } else if (tgUser?.lastAction === 'awaiting_cryptobot_amount' || tgUser?.lastAction === 'awaiting_cryptobot_amount_selection') {
+        const cleanVal = (normalizedText || "").replace(/[^0-9.]/g, "");
+        const amount = parseFloat(cleanVal || "0");
 
         try {
           if (tgUser.lastMessageId) {
@@ -5860,7 +6062,7 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         } catch (e) { }
 
         if (isNaN(amount) || amount <= 0) {
-          targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a valid number.");
+          targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a valid number (e.g. 5, 10, 20).");
           return;
         }
 
@@ -5911,8 +6113,9 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         } else {
           targetBot.sendMessage(chatId, `❌ Failed to create @CryptoBot invoice: ${res.error || 'Please check admin settings'}`);
         }
-      } else if (tgUser?.lastAction === 'awaiting_cryptomus_amount') {
-        const amount = parseFloat(normalizedText || "0");
+      } else if (tgUser?.lastAction === 'awaiting_cryptomus_amount' || tgUser?.lastAction === 'awaiting_cryptomus_amount_selection') {
+        const cleanVal = (normalizedText || "").replace(/[^0-9.]/g, "");
+        const amount = parseFloat(cleanVal || "0");
 
         // Delete prompt and user input
         try {
@@ -5923,13 +6126,14 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         } catch (e) { }
 
         if (isNaN(amount) || amount <= 0) {
-          targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a number.");
+          targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a valid number (e.g. 5, 10, 20).");
           return;
         }
 
         await processCryptomusInvoiceCreation(targetBot, chatId, tgUser, amount);
       } else if (tgUser?.lastAction === 'awaiting_binance_deposit_amount') {
-        const amount = parseFloat(normalizedText || "0");
+        const cleanVal = (normalizedText || "").replace(/[^0-9.]/g, "");
+        const amount = parseFloat(cleanVal || "0");
 
         // Delete prompt and user input
         try {
@@ -5940,7 +6144,7 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         } catch (e) { }
 
         if (isNaN(amount) || amount <= 0) {
-          targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a number.");
+          targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a valid number (e.g. 10).");
           return;
         }
 
@@ -5948,7 +6152,7 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         const payIdKey = 'BINANCE_PAY_ID';
         const payId = (await storage.getSetting(payIdKey))?.value || "Not Set";
 
-        // Amount Locking: Check for existing pending payment with same amount
+        // Amount Locking: Check for existing pending payment with same amount (only within 1 hour)
         const existingPending = await storage.getPendingPaymentByAmount(tgUser.id, Math.round(amount * 100));
         if (existingPending) {
           await storage.updateTelegramUserByChatId(chatId.toString(), { lastAction: null });
@@ -6003,7 +6207,8 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         }
       } else if (tgUser?.lastAction === 'awaiting_trc20_amount') {
         try {
-          const amount = parseFloat(normalizedText || "0");
+          const cleanVal = (normalizedText || "").replace(/[^0-9.]/g, "");
+          const amount = parseFloat(cleanVal || "0");
 
           try {
             if (tgUser.lastMessageId) {
@@ -6013,7 +6218,7 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
           } catch (e) { }
 
           if (isNaN(amount) || amount <= 0) {
-            targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a number.");
+            targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a valid number (e.g. 10).");
             return;
           }
 
@@ -6071,7 +6276,8 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         }
       } else if (tgUser?.lastAction === 'awaiting_aptos_amount') {
         try {
-          const amount = parseFloat(normalizedText || "0");
+          const cleanVal = (normalizedText || "").replace(/[^0-9.]/g, "");
+          const amount = parseFloat(cleanVal || "0");
 
           try {
             if (tgUser.lastMessageId) {
@@ -6081,7 +6287,7 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
           } catch (e) { }
 
           if (isNaN(amount) || amount <= 0) {
-            targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a number.");
+            targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a valid number (e.g. 10).");
             return;
           }
 
@@ -6139,7 +6345,8 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
         }
       } else if (tgUser?.lastAction === 'awaiting_bep20_amount') {
         try {
-          const amount = parseFloat(normalizedText || "0");
+          const cleanVal = (normalizedText || "").replace(/[^0-9.]/g, "");
+          const amount = parseFloat(cleanVal || "0");
 
           try {
             if (tgUser.lastMessageId) {
@@ -6149,7 +6356,7 @@ async function processAntiSpamCheck(userId: string, chatId: number, queryId?: st
           } catch (e) { }
 
           if (isNaN(amount) || amount <= 0) {
-            targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a number.");
+            targetBot.sendMessage(chatId, "❌ Invalid amount. Please enter a valid number (e.g. 10).");
             return;
           }
 
@@ -6745,6 +6952,11 @@ initAdminBotController().catch(err => console.error("Admin bot setup failed:", e
 
 // Start Backup Scheduler
 BackupService.startBackupScheduler().catch(err => console.error("Backup scheduler failed to start:", err));
+
+// Start Expired Payments Cleanup Scheduler (every 5 minutes)
+setInterval(() => {
+  storage.expireOldPayments().catch(err => console.error("Payment cleanup error:", err));
+}, 5 * 60 * 1000);
 
   // Cryptomus Webhook Handler
   app.post("/api/payments/webhook", async (req, res) => {
